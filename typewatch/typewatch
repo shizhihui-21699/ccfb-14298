@@ -1,0 +1,73 @@
+#!/usr/bin/env php
+<?php
+/**
+ * TypeWatch CLI
+ *
+ *   php typewatch scan <path...> [--format=text|json|md] [--entry=/index.php] [--no-color]
+ *   php typewatch verify <path...> --docroot=<dir> [--entry=/index.php]
+ *   php typewatch selftest
+ */
+
+require __DIR__ . '/src/autoload.php';
+
+$args = array_slice($argv, 1);
+$command = $args[0] ?? 'scan';
+$positional = [];
+$flags = [];
+foreach (array_slice($args, 1) as $a) {
+    if (str_starts_with($a, '--')) {
+        [$k, $v] = array_pad(explode('=', $a, 2), 2, null);
+        $flags[substr($k, 2)] = $v ?? true;
+    } else {
+        $positional[] = $a;
+    }
+}
+
+if (isset($flags['no-color'])) Color::disable();
+$format = $flags['format'] ?? 'text';
+$entry = $flags['entry'] ?? '/index.php';
+
+switch ($command) {
+    case 'scan':
+        if (!$positional) { fwrite(STDERR, "usage: typewatch scan <file|dir>... [--format=text|json|md]\n"); exit(2); }
+        $scanner = new Scanner();
+        $result = $scanner->scan($positional, $entry);
+        echo match ($format) {
+            'json' => Report::json($result),
+            'md'   => Report::markdown($result),
+            default => Report::text($result),
+        }, "\n";
+        // Non-zero exit when any high-severity exploitable issue exists.
+        foreach ($result['findings'] as $f) {
+            if (($f['assessment']['severity'] ?? '') === 'high') exit(1);
+        }
+        exit(0);
+
+    case 'verify':
+        if (!$positional) { fwrite(STDERR, "usage: typewatch verify <file|dir>... --docroot=<dir>\n"); exit(2); }
+        $docroot = $flags['docroot'] ?? null;
+        if (!$docroot || !is_dir($docroot)) { fwrite(STDERR, "valid --docroot required\n"); exit(2); }
+        $scanner = new Scanner();
+        $result = $scanner->scan($positional, $entry);
+        $allPocs = [];
+        foreach ($result['findings'] as $f) {
+            foreach ($f['pocs'] ?? [] as $poc) $allPocs[] = $poc;
+        }
+        if (!$allPocs) {
+            echo "No PoCs generated.\n";
+            exit(0);
+        }
+        $verifier = new DynamicVerifier($docroot);
+        $verified = $verifier->verifyAll($allPocs);
+        echo Report::text($result), "\n";
+        echo Report::verificationText($verified), "\n";
+        exit(0);
+
+    case 'selftest':
+        require __DIR__ . '/selftest.php';
+        exit(0);
+
+    default:
+        fwrite(STDERR, "unknown command: {$command}\n");
+        exit(2);
+}
